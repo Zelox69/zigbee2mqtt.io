@@ -1,0 +1,238 @@
+const fz = require('zigbee-herdsman-converters/converters/fromZigbee');
+const tz = require('zigbee-herdsman-converters/converters/toZigbee');
+const exposes = require('zigbee-herdsman-converters/lib/exposes');
+const e = exposes.presets;
+const ea = exposes.access;
+const tuya = require('zigbee-herdsman-converters/lib/tuya');
+
+let currentVoltage = 230; // Valeur par défaut pour la tension
+
+const definition = {
+    fingerprint: [{ modelID: 'TS0601', manufacturerName: '_TZE204_3regm3h6' }],
+    model: 'TS0601_3regm3h6',
+    vendor: 'Tuya',
+    description: 'Gestion de chauffage par fil pilote avec synchronisation de l\'interface',
+
+    fromZigbee: [
+        tuya.fz.datapoints,
+        {
+            cluster: 'manuSpecificTuya',
+            type: ['attributeReport', 'readResponse'],
+            convert: (model, msg, publish, options, meta) => {
+                const dp = msg.data.dp; // Datapoint
+                const value = msg.data.value; // Valeur brute
+
+                switch (dp) {
+                    case 1: // Datapoint pour l'état ON/OFF
+                        return { state: value ? 'ON' : 'OFF' };
+                    case 2: // Datapoint pour le mode de fonctionnement
+                        const modes = {
+                            5: 'comfort_minus_2',
+                            4: 'comfort_minus_1',
+                            0: 'comfort',
+                            1: 'eco',
+                            2: 'anti_frost',
+                            3: 'off',
+                            6: 'program',
+                        };
+                        return { mode: modes[value] || `unknown_${value}` };
+                    case 101: // Datapoint pour la tension actuelle
+                        currentVoltage = value / 10;
+                        return { voltage: currentVoltage };
+                    case 102: // Datapoint pour le courant
+                        const power = Math.round((value * currentVoltage) / 1000);
+                        return { current_power: power };
+                    case 16: // Datapoint pour la température actuelle
+                        return { current_temperature: value / 10 };
+                    case 119: // Datapoint pour la température hors gel
+                        return { antifrost_temperature: value / 10 };
+                    case 117: // Datapoint pour la température ECO
+                        return { eco_temperature: value / 10 };
+                    case 118: // Datapoint pour la température confort
+                        return { comfort_temperature: value / 10 };
+                    case 50: // Datapoint pour la température cible
+                        return { target_temperature: value / 10 };
+                    default:
+                        meta.logger.warn(`Datapoint non géré : ${dp}, valeur : ${value}`);
+                        return null;
+                }
+            },
+        },
+    ],
+
+    toZigbee: [
+        {
+            key: ['state'],
+            convertSet: async (entity, key, value, meta) => {
+                try {
+                    await tuya.sendDataPointBool(entity, 1, value === 'ON');
+                    return { state: value };
+                } catch (error) {
+                    meta.logger.error(`Erreur lors de l'envoi de la commande pour état : ${error?.message || error}`);
+                }
+            },
+        },
+        {
+            key: ['mode'],
+            convertSet: async (entity, key, value, meta) => {
+                try {
+                    const modes = {
+                        'comfort_minus_2': 5,
+                        'comfort_minus_1': 4,
+                        'comfort': 0,
+                        'eco': 1,
+                        'anti_frost': 2,
+                        'off': 3,
+                        'program': 6,
+                    };
+                    const dpValue = modes[value];
+                    if (dpValue === undefined) {
+                        throw new Error(`Mode invalide : ${value}`);
+                    }
+                    await tuya.sendDataPointEnum(entity, 2, dpValue);
+
+                    // Mise à jour de la température cible en fonction du mode
+                    let targetTemp;
+                    switch (value) {
+                        case 'comfort':
+                            targetTemp = meta.state.comfort_temperature;
+                            break;
+                        case 'eco':
+                            targetTemp = meta.state.eco_temperature;
+                            break;
+                        case 'anti_frost':
+                            targetTemp = meta.state.antifrost_temperature;
+                            break;
+                        default:
+                            targetTemp = null;
+                    }
+
+                    if (targetTemp !== null) {
+                        await tuya.sendDataPointValue(entity, 50, Math.round(targetTemp * 10));
+                        meta.logger.info(`Température cible mise à jour : ${targetTemp}°C pour le mode ${value}`);
+                    }
+
+                    return { mode: value };
+                } catch (error) {
+                    meta.logger.error(`Erreur lors de l'envoi de la commande pour mode : ${error?.message || error}`);
+                }
+            },
+        },
+        {
+            key: ['antifrost_temperature'],
+            convertSet: async (entity, key, value, meta) => {
+                try {
+                    const tempValue = Math.round(value * 10);
+                    await tuya.sendDataPointValue(entity, 119, tempValue);
+                } catch (error) {
+                    meta.logger.error(`Erreur lors de l'envoi de la commande pour température hors gel : ${error?.message || error}`);
+                }
+            },
+        },
+        {
+            key: ['eco_temperature'],
+            convertSet: async (entity, key, value, meta) => {
+                try {
+                    const tempValue = Math.round(value * 10);
+                    await tuya.sendDataPointValue(entity, 117, tempValue);
+                } catch (error) {
+                    meta.logger.error(`Erreur lors de l'envoi de la commande pour température ECO : ${error?.message || error}`);
+                }
+            },
+        },
+        {
+            key: ['comfort_temperature'],
+            convertSet: async (entity, key, value, meta) => {
+                try {
+                    const tempValue = Math.round(value * 10);
+                    await tuya.sendDataPointValue(entity, 118, tempValue);
+                } catch (error) {
+                    meta.logger.error(`Erreur lors de l'envoi de la commande pour température confort : ${error?.message || error}`);
+                }
+            },
+        },
+        {
+            key: ['target_temperature'],
+            convertSet: async (entity, key, value, meta) => {
+                try {
+                    const tempValue = Math.round(value * 10);
+                    await tuya.sendDataPointValue(entity, 50, tempValue);
+                } catch (error) {
+                    meta.logger.error(`Erreur lors de l'envoi de la commande pour température cible : ${error?.message || error}`);
+                }
+            },
+        },
+    ],
+
+    exposes: [
+        e.switch().withDescription('Contrôle ON/OFF de l\'appareil'),
+        e.enum('mode', ea.SET, [
+            'comfort_minus_2',
+            'comfort_minus_1',
+            'comfort',
+            'eco',
+            'anti_frost',
+            'off',
+            'program',
+        ]).withDescription('Mode de fonctionnement'),
+        e.numeric('current_power', ea.STATE)
+            .withUnit('W')
+            .withDescription('Puissance actuelle consommée'),
+        e.numeric('voltage', ea.STATE)
+            .withUnit('V')
+            .withDescription('Tension actuelle mesurée'),
+        e.numeric('current_temperature', ea.STATE)
+            .withUnit('°C')
+            .withDescription('Température actuelle mesurée'),
+        e.numeric('antifrost_temperature', ea.SET)
+            .withUnit('°C')
+            .withDescription('Température hors gel (antifrost)'),
+        e.numeric('eco_temperature', ea.SET)
+            .withUnit('°C')
+            .withDescription('Température ECO réglée'),
+        e.numeric('comfort_temperature', ea.SET)
+            .withUnit('°C')
+            .withDescription('Température confort réglée'),
+        e.numeric('target_temperature', ea.SET)
+            .withUnit('°C')
+            .withDescription('Température cible réglée'),
+    ],
+
+    meta: {
+        tuyaDatapoints: [
+            [1, 'state', tuya.valueConverter.onOff],
+            [2, 'mode', { from: (value) => {
+                const modes = {
+                    5: 'comfort_minus_2',
+                    4: 'comfort_minus_1',
+                    0: 'comfort',
+                    1: 'eco',
+                    2: 'anti_frost',
+                    3: 'off',
+                    6: 'program',
+                };
+                return modes[value] || `unknown_${value}`;
+            }, to: (value) => {
+                const modes = {
+                    'comfort_minus_2': 5,
+                    'comfort_minus_1': 4,
+                    'comfort': 0,
+                    'eco': 1,
+                    'anti_frost': 2,
+                    'off': 3,
+                    'program': 6,
+                };
+                return modes[value];
+            }}],
+            [101, 'voltage', { from: (value) => value / 10 }],
+            [102, 'current_power', { from: (value) => Math.round((value * currentVoltage) / 1000) }],
+            [16, 'current_temperature', { from: (value) => value / 10 }],
+            [119, 'antifrost_temperature', { from: (value) => value / 10, to: (value) => Math.round(value * 10) }],
+            [117, 'eco_temperature', { from: (value) => value / 10, to: (value) => Math.round(value * 10) }],
+            [118, 'comfort_temperature', { from: (value) => value / 10, to: (value) => Math.round(value * 10) }],
+            [50, 'target_temperature', { from: (value) => value / 10, to: (value) => Math.round(value * 10) }],
+        ],
+    },
+};
+
+module.exports = definition;
